@@ -24,6 +24,7 @@ import { DesignAnalystNode } from './components/DesignAnalystNode';
 import { ExportPSDNode } from './components/ExportPSDNode';
 import { KnowledgeNode } from './components/KnowledgeNode'; 
 import { DesignReviewerNode } from './components/DesignReviewerNode'; 
+import { AssetPreviewNode } from './components/AssetPreviewNode';
 import { ProjectControls } from './components/ProjectControls';
 import { PSDNodeData } from './types';
 import { ProceduralStoreProvider } from './store/ProceduralContext';
@@ -103,6 +104,16 @@ const initialNodes: Node<PSDNodeData>[] = [
     style: { width: 480 }
   },
   {
+    id: 'node-preview-1',
+    type: 'assetPreview',
+    position: { x: 2750, y: 400 },
+    data: {
+        fileName: null, template: null, validation: null, designLayers: null,
+        instanceCount: 1
+    },
+    style: { width: 420 }
+  },
+  {
     id: 'node-5',
     type: 'targetSplitter',
     position: { x: 1300, y: 50 },
@@ -111,7 +122,7 @@ const initialNodes: Node<PSDNodeData>[] = [
   {
     id: 'node-export-1',
     type: 'exportPsd',
-    position: { x: 2750, y: 400 }, 
+    position: { x: 3300, y: 400 }, 
     data: { fileName: null, template: null, validation: null, designLayers: null },
   }
 ];
@@ -224,12 +235,26 @@ const App: React.FC = () => {
             }
         }
 
+        // Asset Preview Validation Rules (Visual Gatekeeper)
+        if (targetNode.type === 'assetPreview') {
+            const handle = params.targetHandle || '';
+            
+            if (handle.startsWith('payload-in')) {
+                // Accepts Polished (Reviewer) or Raw (Remapper/Resolver)
+                const validSources = ['designReviewer', 'remapper', 'containerResolver'];
+                if (!validSources.includes(sourceNode.type || '')) {
+                    console.warn("Asset Preview 'Payload Input' requires a Reviewer, Remapper, or Resolver source.");
+                    return;
+                }
+            }
+        }
+
         // Export Node Validation
         if (targetNode.type === 'exportPsd' && params.targetHandle?.startsWith('input-')) {
-            // Restore functionality: Allow Reviewer, Remapper, or Resolver
-            const validSources = ['designReviewer', 'remapper', 'containerResolver'];
+            // Updated to accept Asset Preview as a valid source
+            const validSources = ['assetPreview', 'designReviewer', 'remapper', 'containerResolver'];
             if (!validSources.includes(sourceNode.type || '')) {
-                console.warn(`Export Node input requires a payload source (Reviewer, Remapper, Resolver). Got: ${sourceNode.type}`);
+                console.warn(`Export Node input requires a payload source (Preview, Reviewer, Remapper, Resolver). Got: ${sourceNode.type}`);
                 return;
             }
         }
@@ -267,6 +292,7 @@ const App: React.FC = () => {
     remapper: RemapperNode,
     designAnalyst: DesignAnalystNode, 
     designReviewer: DesignReviewerNode,
+    assetPreview: AssetPreviewNode,
     exportPsd: ExportPSDNode,
     knowledge: KnowledgeNode,
   }), []);
