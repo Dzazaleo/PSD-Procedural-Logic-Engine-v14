@@ -1,10 +1,10 @@
-import React, { memo, useState, useEffect, useMemo, useRef } from 'react';
+import React, { memo, useState, useEffect, useMemo } from 'react';
 import { Handle, Position, NodeProps, useEdges, useReactFlow } from 'reactflow';
 import { PSDNodeData, TransformedPayload, TransformedLayer, TemplateMetadata } from '../types';
 import { useProceduralStore } from '../store/ProceduralContext';
 import { findLayerByPath } from '../services/psdService';
 import { Layer } from 'ag-psd';
-import { Eye, CheckCircle2, Zap, Scan, Layers, AlertTriangle, Crosshair, BoxSelect } from 'lucide-react';
+import { Eye, CheckCircle2, Zap, Scan, Layers, Crosshair } from 'lucide-react';
 
 interface PreviewInstanceRowProps {
   nodeId: string;
@@ -44,7 +44,7 @@ const PreviewInstanceRow: React.FC<PreviewInstanceRowProps> = ({ nodeId, index, 
   const [localPreview, setLocalPreview] = useState<string | null>(null);
   
   // Store Access
-  const { payloadRegistry, reviewerRegistry, psdRegistry, registerReviewerPayload, templateRegistry, globalVersion } = useProceduralStore();
+  const { payloadRegistry, reviewerRegistry, psdRegistry, registerReviewerPayload, templateRegistry } = useProceduralStore();
 
   // 1. Resolve Inputs
   const inputEdge = edges.find(e => e.target === nodeId && e.targetHandle === `payload-in-${index}`);
@@ -70,20 +70,22 @@ const PreviewInstanceRow: React.FC<PreviewInstanceRowProps> = ({ nodeId, index, 
   const effectiveMode = (viewMode === 'POLISHED' && isPolishedAvailable) ? 'POLISHED' : 'PROCEDURAL';
   const displayPayload = effectiveMode === 'POLISHED' ? polishedPayload : (polishedPayload || proceduralPayload);
 
-  // 4. Broadcast Selection
+  // 2. Broadcast Selection to Downstream (Export)
   useEffect(() => {
     if (displayPayload) {
       registerReviewerPayload(nodeId, `preview-out-${index}`, displayPayload);
     }
   }, [displayPayload, nodeId, index, registerReviewerPayload]);
 
-  // 5. "ABSOLUTE-LOCAL" COMPOSITOR
+  // 3. "ABSOLUTE-LOCAL" COMPOSITING ENGINE
   useEffect(() => {
     if (!displayPayload) return;
 
-    // BINARY RECOVERY LOGIC
+    // A. Binary Source Recovery
     let sourcePsd = psdRegistry[displayPayload.sourceNodeId];
     if (!sourcePsd) {
+        // Fallback strategy: Try to find a PSD that matches the source path ID structure
+        // This handles cases where connection IDs might shift but the binary is loaded
         const firstAvailableKey = Object.keys(psdRegistry)[0];
         if (firstAvailableKey) {
             sourcePsd = psdRegistry[firstAvailableKey];
@@ -99,23 +101,23 @@ const PreviewInstanceRow: React.FC<PreviewInstanceRowProps> = ({ nodeId, index, 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // A. Checkerboard Background (Transparency Grid)
+    // B. Draw Checkerboard Background
     const squareSize = 20;
     const cols = Math.ceil(w / squareSize);
     const rows = Math.ceil(h / squareSize);
     
     for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
-            ctx.fillStyle = (r + c) % 2 === 0 ? '#1e293b' : '#334155'; // Dark Slate / Mid Slate
+            ctx.fillStyle = (r + c) % 2 === 0 ? '#1e293b' : '#334155'; // Slate 800/700
             ctx.fillRect(c * squareSize, r * squareSize, squareSize, squareSize);
         }
     }
 
-    // B. TARGET SPACE NORMALIZATION (Camera Positioning)
+    // C. Calculate Camera Origin (Normalization Vector)
     let originX = 0;
     let originY = 0;
     
-    // 1. Scan Content Bounds
+    // Scan content bounds to allow auto-centering if requested
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -136,19 +138,20 @@ const PreviewInstanceRow: React.FC<PreviewInstanceRowProps> = ({ nodeId, index, 
         scanBounds(displayPayload.layers);
     }
 
-    // 2. Determine Camera Origin
     if (autoFrame && minX !== Infinity) {
-        // Center the content in the viewport
+        // Mode 1: Auto-Center Content
         const contentW = maxX - minX;
         const contentH = maxY - minY;
         originX = minX + (contentW - w) / 2;
         originY = minY + (contentH - h) / 2;
     } else {
-        // Strict Template Metadata Lookup
+        // Mode 2: Strict Template Coordinates
+        // Search all templates to find the matching container definition
         const allTemplates = Object.values(templateRegistry) as TemplateMetadata[];
         for (const tmpl of allTemplates) {
             const container = tmpl.containers.find(c => 
-                c.name.toLowerCase() === displayPayload.targetContainer.toLowerCase()
+                c.name === displayPayload.targetContainer || // Match cleaned name
+                c.originalName === displayPayload.targetContainer // Match raw name
             );
             if (container) {
                 originX = container.bounds.x;
@@ -158,119 +161,105 @@ const PreviewInstanceRow: React.FC<PreviewInstanceRowProps> = ({ nodeId, index, 
         }
     }
 
-    // D. FLATTENED RENDER TRAVERSAL
+    // D. Recursive Render Loop (Painter's Algorithm)
     const drawLayers = (layers: TransformedLayer[]) => {
-        for (let i = 0; i < layers.length; i++) {
+        // Iterate BACKWARDS to draw bottom layers first (Background -> Foreground)
+        for (let i = layers.length - 1; i >= 0; i--) {
             const layer = layers[i];
             
             if (layer.isVisible) {
+                // 1. Group Recursion (Groups don't render pixels, only their children do)
                 if (layer.children && layer.children.length > 0) {
                     drawLayers(layer.children);
                     continue; 
                 }
 
-                // Calculate Absolute-Local Coordinates
+                // 2. Coordinate Mapping
                 const localX = layer.coords.x - originX;
                 const localY = layer.coords.y - originY;
 
                 ctx.save();
-                
-                // 1. Generative Placeholder
+                ctx.globalAlpha = Number.isFinite(layer.opacity) ? layer.opacity : 1.0;
+
+                // 3. Render Generative Placeholder
                 if (layer.type === 'generative') {
-                    ctx.fillStyle = 'rgba(192, 132, 252, 0.4)';
+                    ctx.fillStyle = 'rgba(192, 132, 252, 0.2)';
                     ctx.strokeStyle = '#c084fc';
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([4, 2]);
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([3, 3]);
                     ctx.fillRect(localX, localY, layer.coords.w, layer.coords.h);
                     ctx.strokeRect(localX, localY, layer.coords.w, layer.coords.h);
+                    
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '8px monospace';
+                    ctx.fillText("AI GEN", localX + 2, localY + 10);
                 } 
-                // 2. Real Pixel Data
+                // 4. Render Raster Pixel Data
                 else if (sourcePsd) {
+                    // Try exact path match first
                     let originalLayer = findLayerByPath(sourcePsd, layer.id);
+                    
+                    // Fallback to name search if path is stale/mismatched
                     if (!originalLayer) {
                          originalLayer = findLayerByName(sourcePsd.children, layer.name);
                     }
 
                     if (originalLayer && originalLayer.canvas) {
-                         // DEBUG: Draw Solid Mass Fill (Yellow/White Tint)
-                         // If you see this but no image, the image is transparent.
-                         ctx.fillStyle = 'rgba(255, 255, 100, 0.1)'; 
-                         ctx.fillRect(localX, localY, layer.coords.w, layer.coords.h);
-
-                         const alpha = Number.isFinite(layer.opacity) ? layer.opacity : 1.0;
-                         ctx.globalAlpha = alpha;
+                         const srcCanvas = originalLayer.canvas as HTMLCanvasElement;
+                         
+                         // Transform Baking: Rotation & Scaling
+                         // Move origin to the CENTER of the layer's bounding box to rotate
+                         const cx = localX + layer.coords.w / 2;
+                         const cy = localY + layer.coords.h / 2;
+                         
+                         ctx.translate(cx, cy);
                          
                          if (layer.transform.rotation) {
-                             const cx = localX + layer.coords.w / 2;
-                             const cy = localY + layer.coords.h / 2;
-                             ctx.translate(cx, cy);
                              ctx.rotate((layer.transform.rotation * Math.PI) / 180);
-                             ctx.translate(-cx, -cy);
                          }
 
-                         // FIX: Define srcCanvas outside try block to be accessible in label logic
-                         const srcCanvas = originalLayer.canvas as HTMLCanvasElement;
-
                          try {
-                            // Explicit Check for Valid Canvas
                             if (srcCanvas.width > 0 && srcCanvas.height > 0) {
+                                // Draw centered at the translated origin
                                 ctx.drawImage(
                                     srcCanvas, 
-                                    localX, 
-                                    localY, 
+                                    -layer.coords.w / 2, // Left relative to center
+                                    -layer.coords.h / 2, // Top relative to center
                                     layer.coords.w, 
                                     layer.coords.h
                                 );
                             } else {
-                                // Empty Canvas Detected (e.g. Spacer Layer or Empty Mask)
-                                ctx.fillStyle = 'rgba(255, 0, 255, 0.2)'; // Magenta Debug Fill
-                                ctx.fillRect(localX, localY, layer.coords.w, layer.coords.h);
+                                // Draw debug placeholder for empty canvas
+                                ctx.fillStyle = 'rgba(255, 0, 255, 0.1)';
+                                ctx.fillRect(-layer.coords.w / 2, -layer.coords.h / 2, layer.coords.w, layer.coords.h);
                             }
                          } catch (e) { 
-                             console.error("Canvas draw error", e);
-                             // Error drawing (tainted?)
-                             ctx.fillStyle = 'rgba(255, 0, 0, 0.5)'; // Red Fill
-                             ctx.fillRect(localX, localY, layer.coords.w, layer.coords.h);
-                             ctx.fillStyle = '#fff';
-                             ctx.font = '10px monospace';
-                             ctx.fillText("DRAW ERR", localX + 2, localY + 12);
+                             console.error("Layer draw error", e);
+                             ctx.strokeStyle = 'red';
+                             ctx.strokeRect(-layer.coords.w / 2, -layer.coords.h / 2, layer.coords.w, layer.coords.h);
                          }
 
-                         // DEBUG: Cyan Border & Label
-                         ctx.globalAlpha = 1.0; 
-                         ctx.strokeStyle = '#06b6d4'; // Cyan
+                         // Debug Overlay: Layer Border
+                         /*
+                         ctx.strokeStyle = 'rgba(6, 182, 212, 0.3)'; // Cyan low opacity
                          ctx.lineWidth = 1;
-                         ctx.setLineDash([2, 2]);
-                         ctx.strokeRect(localX, localY, layer.coords.w, layer.coords.h);
-                         
-                         // Label logic
-                         if (layer.coords.h > 10) {
-                             ctx.fillStyle = '#06b6d4';
-                             ctx.font = '9px monospace';
-                             // Show name and source dimensions for debugging
-                             const dimLabel = srcCanvas ? ` (${srcCanvas.width}x${srcCanvas.height})` : '';
-                             ctx.fillText((originalLayer.name?.substring(0, 15) || 'Layer') + dimLabel, localX + 2, localY + 8);
-                         }
+                         ctx.setLineDash([]);
+                         ctx.strokeRect(-layer.coords.w / 2, -layer.coords.h / 2, layer.coords.w, layer.coords.h);
+                         */
                     } else {
-                        // Missing Pixels
-                        ctx.globalAlpha = 1.0;
-                        ctx.strokeStyle = '#ef4444'; // Red
-                        ctx.lineWidth = 2;
+                        // Missing Pixels Warning
+                        ctx.strokeStyle = '#ef4444';
+                        ctx.lineWidth = 1;
                         ctx.strokeRect(localX, localY, layer.coords.w, layer.coords.h);
                         
                         ctx.beginPath();
                         ctx.moveTo(localX, localY);
                         ctx.lineTo(localX + layer.coords.w, localY + layer.coords.h);
                         ctx.stroke();
-
-                        ctx.fillStyle = '#ef4444';
-                        ctx.font = '10px monospace';
-                        ctx.fillText("NO PIXELS", localX + 2, localY + 12);
                     }
                 } else {
                     // Missing Binary Source
-                    ctx.globalAlpha = 1.0;
-                    ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
+                    ctx.fillStyle = 'rgba(255, 0, 0, 0.1)';
                     ctx.fillRect(localX, localY, layer.coords.w, layer.coords.h);
                 }
 
@@ -283,18 +272,18 @@ const PreviewInstanceRow: React.FC<PreviewInstanceRowProps> = ({ nodeId, index, 
         drawLayers(displayPayload.layers);
     }
     
-    // Auto-Frame Indicator (Overlay)
+    // Auto-Frame Indicator Overlay
     if (autoFrame) {
         ctx.save();
         ctx.fillStyle = '#06b6d4';
-        ctx.font = '10px monospace';
-        ctx.fillText("AUTO-CENTER", 5, h - 5);
+        ctx.font = '9px monospace';
+        ctx.fillText("AUTO-CENTER ACTIVE", 4, h - 4);
         ctx.restore();
     }
 
     setLocalPreview(canvas.toDataURL('image/jpeg', 0.9));
 
-  }, [displayPayload, psdRegistry, templateRegistry, globalVersion, autoFrame]);
+  }, [displayPayload, psdRegistry, templateRegistry, autoFrame]);
 
   // Deep Count for UI
   const leafCount = useMemo(() => {
@@ -373,7 +362,7 @@ const PreviewInstanceRow: React.FC<PreviewInstanceRowProps> = ({ nodeId, index, 
             {/* Stats Overlay */}
             <div className="absolute bottom-2 right-2 flex gap-1">
                 <div className="bg-black/60 backdrop-blur text-slate-300 text-[8px] px-1.5 py-0.5 rounded border border-white/10 font-mono">
-                   {displayPayload ? `${displayPayload.metrics.target.w}x${displayPayload.metrics.target.h}` : 'N/A'}
+                   {displayPayload ? `${Math.round(displayPayload.metrics.target.w)}x${Math.round(displayPayload.metrics.target.h)}` : 'N/A'}
                 </div>
             </div>
         </div>
@@ -419,7 +408,7 @@ export const AssetPreviewNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   };
 
   return (
-    <div className="w-[420px] bg-slate-900 rounded-lg shadow-2xl border border-emerald-500/30 font-sans flex flex-col">
+    <div className="w-[420px] bg-slate-900 rounded-lg shadow-2xl border border-emerald-500/30 font-sans flex flex-col transition-all duration-300 hover:border-emerald-400/50">
       <div className="bg-emerald-950/50 p-2 border-b border-emerald-500/20 flex items-center justify-between">
          <div className="flex items-center space-x-2">
            <Scan className="w-4 h-4 text-emerald-400" />
@@ -438,7 +427,7 @@ export const AssetPreviewNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
 
       <button 
         onClick={addSlot}
-        className="w-full py-1.5 bg-slate-900 hover:bg-slate-800 border-t border-slate-800 text-slate-500 hover:text-slate-300 transition-colors flex items-center justify-center space-x-1"
+        className="w-full py-2 bg-slate-900 hover:bg-slate-800 border-t border-slate-800 text-slate-500 hover:text-slate-300 transition-colors flex items-center justify-center space-x-1"
       >
         <span className="text-[10px] font-bold uppercase tracking-widest">Add Preview Slot</span>
       </button>
